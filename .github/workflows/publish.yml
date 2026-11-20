@@ -1,0 +1,47 @@
+name: Publish packs
+
+# Joins the split archive of every packs/<version> folder and publishes it as the
+# release "packs-<version>" (the installer downloads it from there).
+# Releases of versions that no longer have a packs/<version> folder are deleted.
+on:
+  push:
+    branches: [main]
+    paths: ["packs/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Join, verify, publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          for tag in $(gh release list --limit 100 --json tagName --jq '.[].tagName' | grep '^packs-' || true); do
+            [ -d "packs/${tag#packs-}" ] || { echo "retiring $tag"; gh release delete "$tag" --cleanup-tag -y; }
+          done
+          for dir in packs/*/; do
+            v=$(basename "$dir")
+            sums="$dir/SHA256SUMS"
+            [ -f "$sums" ] || continue
+            name=$(awk '{print $2}' "$sums")
+            parts=$(ls "$dir"/"$name".part* 2>/dev/null | sort)
+            [ -n "$parts" ] || continue
+            if gh release view "packs-$v" >/dev/null 2>&1 && gh release view "packs-$v" --json assets --jq '.assets[].name' | grep -qx "$name"; then
+              echo "packs-$v already published"; continue
+            fi
+            cat $parts > "$name"
+            if [ "$(sha256sum "$name" | cut -d' ' -f1)" != "$(awk '{print $1}' "$sums")" ]; then
+              echo "::notice::packs-$v incomplete (not all parts pushed yet)"; rm -f "$name"; continue
+            fi
+            echo "packs-$v: $(du -h "$name" | cut -f1), checksum OK"
+            gh release view "packs-$v" >/dev/null 2>&1 || \
+              gh release create "packs-$v" --title "Packs $v" --notes "Measured location packs $v. Downloaded automatically by the SubRoo Rooms installer."
+            gh release upload "packs-$v" "$name" --clobber
+            rm -f "$name"
+          done
